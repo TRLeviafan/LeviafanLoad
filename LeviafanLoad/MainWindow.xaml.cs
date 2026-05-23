@@ -5,7 +5,7 @@ using SixLabors.ImageSharp.Processing;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression; // Для ZIP
+using System.IO.Compression;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -81,7 +81,6 @@ namespace LeviafanLoad
             {
                 Log("Проверка обновлений...");
 
-                // GitHub API требует User-Agent
                 if (!_httpClient.DefaultRequestHeaders.Contains("User-Agent"))
                 {
                     _httpClient.DefaultRequestHeaders.Add("User-Agent", "LeviafanLoad-Updater");
@@ -93,12 +92,10 @@ namespace LeviafanLoad
                 using (var doc = System.Text.Json.JsonDocument.Parse(json))
                 {
                     var root = doc.RootElement;
-                    string latestVersion = root.GetProperty("tag_name").GetString().Replace("v", ""); // Убираем 'v' если версия записана как 'v1.0.1'
-
-                    // Если версия в сети отличается от нашей
+                    string latestVersion = root.GetProperty("tag_name").GetString().Replace("v", "");
+                 
                     if (latestVersion != CurrentVersion)
                     {
-                        // Ищем ссылку на ZIP архив в массиве прикрепленных файлов (assets)
                         var assets = root.GetProperty("assets");
                         foreach (var asset in assets.EnumerateArray())
                         {
@@ -107,7 +104,6 @@ namespace LeviafanLoad
                             {
                                 _updateDownloadUrl = asset.GetProperty("browser_download_url").GetString();
 
-                                // Показываем кнопку в UI
                                 Dispatcher.Invoke(() =>
                                 {
                                     btnUpdate.Visibility = Visibility.Visible;
@@ -240,7 +236,6 @@ namespace LeviafanLoad
         {
             if (string.IsNullOrWhiteSpace(url)) return;
 
-            // Если пользователь забыл http://
             if (!url.StartsWith("http://") && !url.StartsWith("https://"))
             {
                 url = "https://" + url;
@@ -282,22 +277,7 @@ namespace LeviafanLoad
             }
         }
       
-        private void Log(string message)
-        {
-            Dispatcher.Invoke(() =>
-            {
-                string time = DateTime.Now.ToString("HH:mm:ss");
-               
-                lstLog.Items.Add($"[{time}] {message}");
-                if (lstLog.Items.Count > 0)
-                {
-                    var lastItem = lstLog.Items[lstLog.Items.Count - 1];
-                    lstLog.ScrollIntoView(lastItem);
-                }
-
-                txtMiniLog.Text = $"Статус: {message}";
-            });
-        }
+        
         private async Task ProcessBase64Image(string dataUrl, int current)
         {
             try
@@ -372,7 +352,6 @@ namespace LeviafanLoad
                             break;
 
                         case "done":
-                            // Если страниц нет ИЛИ мы поймали авто-остановку (ошибка 404)
                             if (total == 0 || data == "404")
                             {
                                 Log(data == "404" ? "Обнаружена страница 404. Похоже, главы закончились." : "Изображений не найдено.");
@@ -387,7 +366,6 @@ namespace LeviafanLoad
 
                             Log($"Захват завершен. Найдено изображений: {total}");
 
-                            // ЕСЛИ НАЖАЛИ СТОП ВО ВРЕМЯ СКАЧИВАНИЯ
                             if (_cancelRequested)
                             {
                                 ResetCaptureButton();
@@ -403,7 +381,7 @@ namespace LeviafanLoad
                             }
                             else
                             {
-                                ResetCaptureButton(); // Сбрасываем кнопку для одиночной загрузки
+                                ResetCaptureButton();
                             }
                             break;
                     }
@@ -414,7 +392,6 @@ namespace LeviafanLoad
                 Log($"Ошибка при обработке сообщения от браузера: {ex.Message}");
             }
         }
-
 
         private async Task PostProcessChapterAsync()
         {
@@ -672,6 +649,23 @@ namespace LeviafanLoad
                 })();";
 
             await webView.ExecuteScriptAsync(js);
+        }
+
+        private void Log(string message)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                string time = DateTime.Now.ToString("HH:mm:ss");
+
+                lstLog.Items.Add($"[{time}] {message}");
+                if (lstLog.Items.Count > 0)
+                {
+                    var lastItem = lstLog.Items[lstLog.Items.Count - 1];
+                    lstLog.ScrollIntoView(lastItem);
+                }
+
+                txtMiniLog.Text = $"Статус: {message}";
+            });
         }
     }
 }
