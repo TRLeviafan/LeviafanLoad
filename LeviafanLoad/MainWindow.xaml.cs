@@ -15,10 +15,11 @@ namespace LeviafanLoad
     public partial class MainWindow : Window
     {
   
-        private const string CurrentVersion = "1.0.0"; 
+        private const string CurrentVersion = "1.1.0"; 
         private const string GithubOwner = "TRLeviafan"; 
         private const string GithubRepo = "LeviafanLoad";
         private string _updateDownloadUrl = "";
+        
 
         private bool _isDownloading = false;
         private bool _cancelRequested = false;
@@ -28,9 +29,9 @@ namespace LeviafanLoad
         private static readonly System.Net.Http.HttpClient _httpClient = new System.Net.Http.HttpClient();
      
         private string _currentChapterFolder = "";
-        private string _currentPagePrefix = "Page_"; 
+        private string _currentPagePrefix = "Page_";
+        private string _currentPageUrl = "";
 
-   
         private bool _isBatchMode = false;
         private bool _isBatchAuto = false;
         private int _batchCurrentIndex = 0;
@@ -307,14 +308,26 @@ namespace LeviafanLoad
         {
             try
             {
-                var imageBytes = await _httpClient.GetByteArrayAsync(url);
-                
-                string ext = url.Contains(".jpg") || url.Contains(".jpeg") ? ".jpg" : ".png";
-                string fileName = $"{_currentPagePrefix}{current:D4}{ext}";
-                string filePath = Path.Combine(_currentChapterFolder, fileName);
+                using (var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, url))
+                {
+                    if (!string.IsNullOrEmpty(_currentPageUrl))
+                    {
+                        request.Headers.Referrer = new Uri(_currentPageUrl);
+                    }
+                    request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
-                await Task.Run(() => File.WriteAllBytes(filePath, imageBytes));
-                Log($"Сохранено (URL): {fileName}");
+                    var response = await _httpClient.SendAsync(request);
+                    response.EnsureSuccessStatusCode(); 
+
+                    var imageBytes = await response.Content.ReadAsByteArrayAsync();
+
+                    string ext = url.Contains(".jpg") || url.Contains(".jpeg") ? ".jpg" : ".png";
+                    string fileName = $"{_currentPagePrefix}{current:D4}{ext}";
+                    string filePath = Path.Combine(_currentChapterFolder, fileName);
+
+                    await Task.Run(() => File.WriteAllBytes(filePath, imageBytes));
+                    Log($"Сохранено (URL): {fileName}");
+                }
             }
             catch (Exception ex)
             {
@@ -425,69 +438,167 @@ namespace LeviafanLoad
                         Log("В папке нет изображений для обработки.");
                         return;
                     }
-                   
+
                     if (combineParts || combineHeight)
                     {
                         Log("Запуск движка склейки...");
 
-                        int targetWidth = 0;
-                        int totalHeight = 0;
-                        var fileHeights = new Dictionary<string, int>();
-                      
+                        var fileInfos = new Dictionary<string, (int Width, int Height)>();
+                        var widthCounts = new Dictionary<int, int>();
+
                         foreach (var f in files)
                         {
-                            
                             var info = SixLabors.ImageSharp.Image.Identify(f);
-                            if (targetWidth == 0) targetWidth = info.Width;
+                            fileInfos[f] = (info.Width, info.Height);
+                            if (widthCounts.ContainsKey(info.Width)) widthCounts[info.Width]++;
+                            else widthCounts[info.Width] = 1;
+                        }
 
-                            int scaledHeight = info.Width != targetWidth ? (int)((double)info.Height * targetWidth / info.Width) : info.Height;
+                        var sortedWidths = widthCounts.OrderByDescending(kv => kv.Value).ToList();
+                        int selectedWidth = sortedWidths[0].Key;
+                        int percentage = (sortedWidths[0].Value * 100) / files.Count;
+
+                        if (percentage < 90)
+                        {
+                            selectedWidth = fileInfos.Values.Max(info => info.Width);
+                            Log($"Разброс ширин! Выбрана максимальная: {selectedWidth}px");
+                        }
+                        else
+                        {
+                            Log($"Базовая ширина: {selectedWidth}px (совпадает у {percentage}% файлов)");
+                        }
+
+                        var fileHeights = new Dictionary<string, int>();
+                        int totalHeight = 0;
+                        foreach (var f in files)
+                        {
+                            int scaledHeight = fileInfos[f].Width != selectedWidth
+                                ? Math.Max(1, fileInfos[f].Height * selectedWidth / fileInfos[f].Width)
+                                : fileInfos[f].Height;
+
                             fileHeights[f] = scaledHeight;
                             totalHeight += scaledHeight;
                         }
-                     
-                        using (var bigCanvas = new Image<Rgba32>(targetWidth, totalHeight))
+
+                        if (combineParts)
                         {
-                            int currentY = 0;
-                            foreach (var f in files)
+                            Log($"Режим: Нарезка на {partsCount} частей. Группировка файлов...");
+
+                            if (partsCount > files.Count) partsCount = files.Count;
+                            if (partsCount <= 0) partsCount = 1;
+
+                            int filesPerPart = files.Count / partsCount;
+                            int remainder = files.Count % partsCount;
+
+                            int currentFileIndex = 0;
+
+                            for (int i = 0; i < partsCount; i++)
                             {
-                                using (var img = SixLabors.ImageSharp.Image.Load(f))
+                                int filesInThisPart = filesPerPart;
+                                if (i == partsCount - 1) filesInThisPart += remainder;
+
+                                if (filesInThisPart == 0) continue;
+
+                                int partPixelHeight = 0;
+                                for (int j = 0; j < filesInThisPart; j++)
                                 {
-                                    if (img.Width != targetWidth)
+                                    partPixelHeight += fileHeights[files[currentFileIndex + j]];
+                                }
+
+                                using (var sliceCanvas = new Image<Rgba32>(selectedWidth, partPixelHeight))
+                                {
+                                    sliceCanvas.Mutate(x => x.BackgroundColor(SixLabors.ImageSharp.Color.White));
+                                    int currentY = 0;
+
+                                    for (int j = 0; j < filesInThisPart; j++)
                                     {
-                                        img.Mutate(x => x.Resize(targetWidth, fileHeights[f]));
+                                        string fileToDraw = files[currentFileIndex];
+                                        int h = fileHeights[fileToDraw];
+
+                                        using (var img = SixLabors.ImageSharp.Image.Load(fileToDraw))
+                                        {
+                                            if (img.Width != selectedWidth)
+                                            {
+                                                img.Mutate(x => x.Resize(selectedWidth, h, KnownResamplers.Bicubic));
+                                            }
+                                            sliceCanvas.Mutate(x => x.DrawImage(img, new SixLabors.ImageSharp.Point(0, currentY), 1f));
+                                        }
+                                        currentY += h;
+                                        currentFileIndex++;
                                     }
 
-                                    bigCanvas.Mutate(x => x.DrawImage(img, new SixLabors.ImageSharp.Point(0, currentY), 1f));
-                                } 
-                            }
-
-                            Log("Рулон собран. Начинаю нарезку...");
-                          
-                            foreach (var f in files) File.Delete(f);
-                        
-                            int partHeight = combineHeight ? sliceHeight : (totalHeight / partsCount);
-                            int currentSliceY = 0;
-                            int pieceIndex = 1;
-                       
-                            while (currentSliceY < totalHeight)
-                            {
-                                int h = Math.Min(partHeight, totalHeight - currentSliceY);
-                                using (var slice = bigCanvas.Clone(x => x.Crop(new SixLabors.ImageSharp.Rectangle(0, currentSliceY, targetWidth, h))))
-                                {
-                                    string outPath = Path.Combine(_currentChapterFolder, $"{_currentPagePrefix}{pieceIndex:D4}.png");
-                                    slice.SaveAsPng(outPath);
+                                    string outPath = Path.Combine(_currentChapterFolder, $"{_currentPagePrefix}{(i + 1):D4}_stitched.png");
+                                    sliceCanvas.SaveAsPng(outPath);
                                 }
-                                currentSliceY += h;
-                                pieceIndex++;
                             }
                         }
-                        Log("Склейка и нарезка успешно завершены.");
+                        else if (combineHeight)
+                        {
+                            Log($"Режим: Нарезка по высоте ({sliceHeight}px)...");
+                            int partHeight = sliceHeight > 0 ? sliceHeight : 4000;
+
+                            int currentFileIndex = 0;
+                            int sourceYOffset = 0;
+                            int pieceIndex = 1;
+                            int totalProcessedHeight = 0;
+
+                            while (totalProcessedHeight < totalHeight && currentFileIndex < files.Count)
+                            {
+                                int currentSliceHeight = Math.Min(partHeight, totalHeight - totalProcessedHeight);
+                                if (currentSliceHeight <= 0) break;
+
+                                using (var sliceCanvas = new Image<Rgba32>(selectedWidth, currentSliceHeight))
+                                {
+                                    sliceCanvas.Mutate(x => x.BackgroundColor(SixLabors.ImageSharp.Color.White));
+                                    int sliceYOffset = 0;
+
+                                    while (sliceYOffset < currentSliceHeight && currentFileIndex < files.Count)
+                                    {
+                                        string currentFile = files[currentFileIndex];
+                                        int scaledH = fileHeights[currentFile];
+
+                                        int remainingInFile = scaledH - sourceYOffset;
+                                        int spaceInSlice = currentSliceHeight - sliceYOffset;
+                                        int drawHeight = Math.Min(remainingInFile, spaceInSlice);
+
+                                        using (var img = SixLabors.ImageSharp.Image.Load(currentFile))
+                                        {
+                                            if (img.Width != selectedWidth)
+                                                img.Mutate(x => x.Resize(selectedWidth, scaledH, KnownResamplers.Bicubic));
+
+                                            using (var croppedSource = img.Clone(x => x.Crop(new SixLabors.ImageSharp.Rectangle(0, sourceYOffset, selectedWidth, drawHeight))))
+                                            {
+                                                sliceCanvas.Mutate(x => x.DrawImage(croppedSource, new SixLabors.ImageSharp.Point(0, sliceYOffset), 1f));
+                                            }
+                                        }
+
+                                        sliceYOffset += drawHeight;
+                                        sourceYOffset += drawHeight;
+
+                                        if (sourceYOffset >= scaledH)
+                                        {
+                                            sourceYOffset = 0;
+                                            currentFileIndex++;
+                                        }
+                                    }
+
+                                    string outPath = Path.Combine(_currentChapterFolder, $"{_currentPagePrefix}{pieceIndex:D4}_stitched.png");
+                                    sliceCanvas.SaveAsPng(outPath);
+                                    pieceIndex++;
+                                }
+                                totalProcessedHeight += currentSliceHeight;
+                            }
+                        }
+
+                        Log("Очистка оригинальных исходников...");
+                        foreach (var f in files) File.Delete(f);
+
+                        Log("Склейка успешно завершена.");
                     }
-                   
+
                     if (doZip)
                     {
                         Log("Создание ZIP-архива...");
-                     
                         string zipPath = _currentChapterFolder + ".zip";
 
                         if (File.Exists(zipPath)) File.Delete(zipPath);
@@ -495,7 +606,6 @@ namespace LeviafanLoad
                         ZipFile.CreateFromDirectory(_currentChapterFolder, zipPath, CompressionLevel.Optimal, false);
                         Log($"Архив готов: {Path.GetFileName(zipPath)}");
 
-                       
                         Directory.Delete(_currentChapterFolder, true);
                         Log("Временная папка удалена.");
                     }
@@ -507,6 +617,24 @@ namespace LeviafanLoad
                     Log($"Ошибка постобработки: {ex.Message}");
                 }
             });
+        }
+
+        private string GetUniquePath(string basePath)
+        {
+            if (!Directory.Exists(basePath) && !File.Exists(basePath + ".zip"))
+            {
+                return basePath;
+            }
+
+            int counter = 2;
+            string newPath;
+            do
+            {
+                newPath = $"{basePath} ({counter})";
+                counter++;
+            } while (Directory.Exists(newPath) || File.Exists(newPath + ".zip"));
+
+            return newPath;
         }
 
         private void btnCapture_Click(object sender, RoutedEventArgs e)
@@ -569,14 +697,26 @@ namespace LeviafanLoad
         private async void StartPageCapture()
         {
             Log("Запуск глубокого сканирования страницы...");
-            
-            string currentIndexStr = _isBatchMode ? _batchCurrentIndex.ToString() : txtBatchStart.Text;
-            string folderName = txtOutputNamePattern.Text.Replace("{i}", currentIndexStr);
 
-            _currentChapterFolder = Path.Combine(txtFolder.Text, folderName);
+            _currentPageUrl = webView.Source?.ToString() ?? txtUrl.Text;
+
+            string currentIndexStr = _isBatchMode ? _batchCurrentIndex.ToString() : txtBatchStart.Text;
+            string folderPattern = txtOutputNamePattern.Text;
+
+            if (_isBatchMode && !folderPattern.Contains("{i}"))
+            {
+                folderPattern += "_{i}";
+                Log("Внимание: в шаблон имени добавлено {i} для пакетной загрузки.");
+            }
+
+            string folderName = folderPattern.Replace("{i}", currentIndexStr);
+            string basePath = Path.Combine(txtFolder.Text, folderName);
+
+            _currentChapterFolder = GetUniquePath(basePath);
             Directory.CreateDirectory(_currentChapterFolder);
+
             _currentPagePrefix = txtPagePrefix.Text;
-          
+            _currentPageUrl = webView.Source?.ToString() ?? txtUrl.Text;
             string js = @"(async () => {
                     if (document.title.includes('404') || document.body.innerText.includes('Страница не найдена')) {
                         chrome.webview.postMessage({ type: 'done', data: '404', current: 0, total: 0 });
@@ -628,6 +768,28 @@ namespace LeviafanLoad
                         if (url.startsWith('data:')) {
                             sendMsg('dataurl', url, current, total); continue;
                         }
+            
+                        // ВЕРНУЛИ ЖЕЛЕЗНУЮ ОБРАБОТКУ BLOB ДЛЯ KAKAO
+                        if (url.startsWith('blob:')) {
+                            try {
+                                const resp = await fetch(url);
+                                const buffer = await resp.arrayBuffer();
+                                const bytes = new Uint8Array(buffer);
+                                let binary = '';
+                                const chunkSize = 8192;
+                                for (let i = 0; i < bytes.length; i += chunkSize) {
+                                    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+                                }
+                                const base64 = btoa(binary);
+                                const mimeType = resp.headers.get('Content-Type') || 'image/png';
+                                sendMsg('dataurl', `data:${mimeType};base64,${base64}`, current, total);
+                            } catch(e) {
+                                sendMsg('log', 'Ошибка Blob: ' + e.message, current, total);
+                            }
+                            continue;
+                        }
+
+                        // Обычный Fetch для остального (работает как раньше)
                         try {
                             const resp = await fetch(url);
                             if (!resp.ok) throw new Error('Bad status');
